@@ -1,0 +1,286 @@
+name: Build Soporte SINAPSIS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SCITER_RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VERSION: "1.4.9"
+
+  SINAPSIS_ID_SERVER: ${{ secrets.SINAPSIS_ID_SERVER }}
+  SINAPSIS_RELAY_SERVER: ${{ secrets.SINAPSIS_RELAY_SERVER }}
+  SINAPSIS_API_SERVER: ${{ secrets.SINAPSIS_API_SERVER }}
+  SINAPSIS_PUBLIC_KEY: ${{ secrets.SINAPSIS_PUBLIC_KEY }}
+
+jobs:
+
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-topmost:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  windows-x64:
+    name: Soporte SINAPSIS - Windows x64
+    needs:
+      - generate-bridge
+      - build-topmost
+
+    runs-on: windows-2022
+
+    steps:
+
+      - name: Export GitHub Actions cache variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410
+        with:
+          script: |
+            core.exportVariable(
+              'ACTIONS_CACHE_URL',
+              process.env.ACTIONS_CACHE_URL || ''
+            );
+            core.exportVariable(
+              'ACTIONS_RUNTIME_TOKEN',
+              process.env.ACTIONS_RUNTIME_TOKEN || ''
+            );
+
+      - name: Checkout source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          submodules: recursive
+
+      - name: Restore Flutter/Rust bridge
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: windows-2022-sinapsis-x64
+
+      - name: Replace Flutter engine with RustDesk engine
+        shell: powershell
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+
+          Invoke-WebRequest `
+            -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip `
+            -OutFile windows-x64-release.zip
+
+          Expand-Archive `
+            -Path windows-x64-release.zip `
+            -DestinationPath windows-x64-release
+
+          Move-Item `
+            -Force `
+            windows-x64-release/* `
+            C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+
+      - name: Patch Flutter 3.24.5
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff \
+            $(dirname $(dirname $(which flutter)))
+
+          cd $(dirname $(dirname $(which flutter)))
+
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        shell: bash
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet x64-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r log; do
+              echo "===== $log ====="
+              cat "$log"
+            done
+
+            exit 1
+          fi
+
+      - name: Inject SINAPSIS configuration
+        shell: powershell
+        run: |
+          $path = "src/common.rs"
+          $content = Get-Content $path -Raw
+
+          $needle = "pub fn load_custom_client() {"
+
+          if (-not $content.Contains($needle)) {
+            throw "No se encontro load_custom_client() en src/common.rs"
+          }
+
+          $replacement = @'
+          pub fn load_custom_client() {
+              let mut sinapsis_build = false;
+
+              {
+                  let mut settings =
+                      config::OVERWRITE_SETTINGS.write().unwrap();
+
+                  if let Some(value) = option_env!("SINAPSIS_ID_SERVER") {
+                      if !value.is_empty() {
+                          settings.insert(
+                              keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_owned(),
+                              value.to_owned(),
+                          );
+                          sinapsis_build = true;
+                      }
+                  }
+
+                  if let Some(value) = option_env!("SINAPSIS_RELAY_SERVER") {
+                      if !value.is_empty() {
+                          settings.insert(
+                              keys::OPTION_RELAY_SERVER.to_owned(),
+                              value.to_owned(),
+                          );
+                      }
+                  }
+
+                  if let Some(value) = option_env!("SINAPSIS_API_SERVER") {
+                      if !value.is_empty() {
+                          settings.insert(
+                              keys::OPTION_API_SERVER.to_owned(),
+                              value.to_owned(),
+                          );
+                      }
+                  }
+
+                  if let Some(value) = option_env!("SINAPSIS_PUBLIC_KEY") {
+                      if !value.is_empty() {
+                          settings.insert(
+                              keys::OPTION_KEY.to_owned(),
+                              value.to_owned(),
+                          );
+                      }
+                  }
+              }
+
+              if sinapsis_build {
+                  *config::APP_NAME.write().unwrap() =
+                      "Soporte-SINAPSIS".to_owned();
+              }
+          '@
+
+          $content = $content.Replace($needle, $replacement)
+
+          Set-Content `
+            -Path $path `
+            -Value $content `
+            -NoNewline
+
+          Write-Host "Configuracion SINAPSIS inyectada."
+
+      - name: Build RustDesk Windows x64
+        shell: powershell
+        run: |
+          python3 .\build.py `
+            --portable `
+            --flutter `
+            --skip-portable-pack `
+            --hwcodec `
+            --vram
+
+          Move-Item `
+            ./flutter/build/windows/x64/runner/Release `
+            ./rustdesk
+
+      - name: Restore TopMost helper
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: topmostwindow-artifacts-x64
+          path: ./rustdesk
+
+      - name: Copy Windows resource metadata
+        continue-on-error: true
+        shell: bash
+        run: |
+          runner_res=$(find . -name "Runner.res" | head -n 1)
+
+          if [ -n "$runner_res" ]; then
+            cp "$runner_res" ./libs/portable/Runner.res
+          fi
+
+      - name: Build Soporte SINAPSIS portable EXE
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml
+
+          pushd ./libs/portable
+
+          pip3 install -r requirements.txt
+
+          python3 ./generate.py \
+            -f ../../rustdesk/ \
+            -o . \
+            -e ../../rustdesk/rustdesk.exe
+
+          popd
+
+          mkdir -p ./output
+
+          mv \
+            ./target/release/rustdesk-portable-packer.exe \
+            ./output/Soporte-SINAPSIS-Windows-x64.exe
+
+      - name: Generate SHA256
+        shell: powershell
+        run: |
+          Get-FileHash `
+            ./output/Soporte-SINAPSIS-Windows-x64.exe `
+            -Algorithm SHA256 |
+          Format-List
+
+      - name: Upload Soporte SINAPSIS
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Soporte-SINAPSIS-Windows-x64
+          path: ./output/Soporte-SINAPSIS-Windows-x64.exe
+          if-no-files-found: error
