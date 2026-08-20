@@ -157,10 +157,8 @@ jobs:
             throw "No se encontro load_custom_client() en src/common.rs"
           }
 
-          $replacement = @'
+          $injection = @'
           pub fn load_custom_client() {
-              let mut sinapsis_build = false;
-
               {
                   let mut settings =
                       config::OVERWRITE_SETTINGS.write().unwrap();
@@ -171,7 +169,6 @@ jobs:
                               keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_owned(),
                               value.to_owned(),
                           );
-                          sinapsis_build = true;
                       }
                   }
 
@@ -203,20 +200,24 @@ jobs:
                   }
               }
 
-              if sinapsis_build {
+              if option_env!("SINAPSIS_ID_SERVER")
+                  .map(|value| !value.is_empty())
+                  .unwrap_or(false)
+              {
                   *config::APP_NAME.write().unwrap() =
                       "Soporte-SINAPSIS".to_owned();
               }
+
           '@
 
-          $content = $content.Replace($needle, $replacement)
+          $content = $content.Replace($needle, $injection)
 
           Set-Content `
             -Path $path `
             -Value $content `
             -NoNewline
 
-          Write-Host "Configuracion SINAPSIS inyectada."
+          Write-Host "Configuracion SINAPSIS inyectada sin eliminar la logica original."
 
       - name: Build RustDesk Windows x64
         shell: powershell
