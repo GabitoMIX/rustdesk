@@ -162,6 +162,11 @@ jobs:
               {
                   let mut settings =
                       config::OVERWRITE_SETTINGS.write().unwrap();
+                      
+                  settings.insert(
+                      "allow-remote-config-modification".to_owned(),
+                      "Y".to_owned(),
+                  );
 
                   if let Some(value) = option_env!("SINAPSIS_ID_SERVER") {
                       if !value.is_empty() {
@@ -232,6 +237,10 @@ jobs:
           Move-Item `
             ./flutter/build/windows/x64/runner/Release `
             ./rustdesk
+            
+          Rename-Item `
+            ./rustdesk/rustdesk.exe `
+            Soporte-SINAPSIS.exe
 
       - name: Restore TopMost helper
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -261,7 +270,7 @@ jobs:
           python3 ./generate.py \
             -f ../../rustdesk/ \
             -o . \
-            -e ../../rustdesk/rustdesk.exe
+            -e ../../rustdesk/Soporte-SINAPSIS.exe
 
           popd
 
